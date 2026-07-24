@@ -1,1 +1,99 @@
+name: Build Windows (Mahdi IPTV Master)
 
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    env:
+      TARGET: x86_64-pc-windows-msvc
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Unzip uploaded source (if present)
+        shell: bash
+        run: |
+          set -e
+          if [ -f "package.json" ]; then
+            echo "package.json already at repo root, skipping unzip."
+            exit 0
+          fi
+
+          zip_file=$(find . -maxdepth 1 -iname "*.zip" | head -n1)
+          if [ -z "$zip_file" ]; then
+            echo "::error::No package.json and no .zip file found at repo root. Upload the project zip to the repo root, or commit the unzipped source."
+            exit 1
+          fi
+
+          echo "Found $zip_file — extracting..."
+          rm -rf _extracted
+          mkdir _extracted
+          unzip -q "$zip_file" -d _extracted
+
+          src_dir=$(find _extracted -maxdepth 3 -name package.json -exec dirname {} \; | head -n1)
+          if [ -z "$src_dir" ]; then
+            echo "::error::Could not find package.json inside $zip_file. Check the zip contains the Mahdi IPTV Master project."
+            exit 1
+          fi
+
+          echo "Using source dir: $src_dir"
+          cp -rf "$src_dir"/. .
+          rm -rf _extracted "$zip_file"
+          echo "Extraction complete."
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install frontend dependencies
+        run: bun install
+
+      - name: Download ffmpeg/ffprobe binaries
+        run: bash scripts/download-ffmpeg.sh ${{ env.TARGET }}
+
+      - name: Build app (installer .exe + portable .exe)
+        uses: tauri-apps/tauri-action@v0.6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: --target ${{ env.TARGET }}
+
+      - name: Stage portable build
+        shell: pwsh
+        run: |
+          $version = (Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json).version
+          $staging = "portable-staging"
+          New-Item -ItemType Directory -Path $staging
+          Copy-Item "src-tauri/target/${{ env.TARGET }}/release/iptv-checker.exe" "$staging/Mahdi IPTV Master.exe"
+          Copy-Item "src-tauri/binaries/ffmpeg-${{ env.TARGET }}.exe" "$staging/ffmpeg.exe"
+          Copy-Item "src-tauri/binaries/ffprobe-${{ env.TARGET }}.exe" "$staging/ffprobe.exe"
+          Compress-Archive -Path "$staging/*" -DestinationPath "Mahdi-IPTV-Master_${version}_win_x64_portable.zip"
+
+      - name: Upload installer (.exe setup)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mahdi-IPTV-Master-Installer
+          path: src-tauri/target/${{ env.TARGET }}/release/bundle/nsis/*.exe
+
+      - name: Upload portable build
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mahdi-IPTV-Master-Portable
+          path: Mahdi-IPTV-Master_*_win_x64_portable.zip
